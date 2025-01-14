@@ -10,6 +10,9 @@ library(maps)
 library(leaflet)
 library(geosphere)
 library(RColorBrewer)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(patchwork)
 
 # set working directory
 setwd("/Users/tom/Desktop/Research_project_2/Track_data_montagu_Harrier/Data on interruptions migrating harrier/RAW data individual tracks")
@@ -43,7 +46,7 @@ grouped_data <- filtered_data %>%
 
 
 
-# Track plot --------------------------------------------------------------
+# Track plot, Whole track LEAFLET--------------------------------------------------------------
 # Step 1: Prepare the data
 map_data <- grouped_data %>%
   filter(!is.na(latitude) & !is.na(longitude)) %>%
@@ -86,4 +89,128 @@ leaflet(map_data) %>%
     title = "Hour of Day (0-23)",
     opacity = 0.8
   )
+
+
+# Track plot Per day GGPLOT ------------------------------------------------------
+# Step 1: Prepare World Map
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Step 2: Prepare Bird Data
+map_data <- map_data %>%
+  filter(!is.na(latitude) & !is.na(longitude)) %>%
+  mutate(
+    longitude = ifelse(longitude > 180, longitude - 360, longitude)
+  )
+
+# Step 3: Calculate the Bounding Box (min/max lat/lon) for Each Day
+map_data_limits <- map_data %>%
+  group_by(date) %>%
+  summarise(
+    lon_min = min(longitude, na.rm = TRUE),
+    lon_max = max(longitude, na.rm = TRUE),
+    lat_min = min(latitude, na.rm = TRUE),
+    lat_max = max(latitude, na.rm = TRUE)
+  )
+
+# Step 4: Create the Plot with Dynamic Zoom for Each Day
+ggplot() +
+  # Add the world map as the background
+  geom_sf(data = world_map, fill = "lightgray", color = "white") +
+  # Add the bird track with increased linewidth for visibility
+  geom_path(
+    data = map_data,
+    aes(x = longitude, y = latitude, group = date),
+    linewidth = 2, alpha = 0.8, color = "blue"
+  ) +
+  # Add points for the bird positions
+  geom_point(
+    data = map_data,
+    aes(x = longitude, y = latitude),
+    size = 3, alpha = 0.6, color = "red"
+  ) +
+  # Customize the appearance
+  labs(
+    title = "Bird Migration Tracks by Day",
+    x = "Longitude",
+    y = "Latitude"
+  ) +
+  theme_minimal() +
+  # Facet the plot by date
+  #facet_wrap(~date) +
+  # Apply coord_cartesian() to dynamically zoom for each day
+  coord_cartesian(
+    xlim = c(-180, 180), # Keep a global limit for longitude
+    ylim = c(-90, 90),    # Keep a global limit for latitude
+    expand = FALSE
+  ) +
+  theme(
+    strip.text = element_text(size = 10), # Smaller facet labels
+    axis.text = element_text(size = 8)    # Axis text size
+  )
+
+# Extract wind data -------------------------------------------------------
+# Step 1: Ensure the Grouped_data has required columns
+grouped_data <- grouped_data %>%
+  mutate(
+    date = as.Date(date_time),  # Extract the date from the datetime
+    hour = hour(date_time)      # Extract the hour (0-23) from the datetime
+  )
+
+# Step 2: Combine 'date' and 'hour' into a single datetime column
+grouped_data <- grouped_data %>%
+  mutate(
+    datetime = as.POSIXct(paste(date, sprintf("%02d:00:00", hour)),
+                          format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
+    datetime = format(as.POSIXct(datetime), "%Y-%m-%d %H:%M:%S")  # Reformat to character
+  )
+
+# Step 2.1: Transform longitudes to the 0-360 range
+grouped_data <- grouped_data %>%
+  mutate(
+    longitude = ifelse(longitude < 0, 360 + longitude, longitude)
+  )
+
+# Step 3: Initialize empty vectors for wind data
+uwind <- numeric(nrow(grouped_data))
+vwind <- numeric(nrow(grouped_data))
+
+# Step 4: Extract wind data for each hourly point (loop)
+for (i in 1:nrow(grouped_data)) {
+  tryCatch({
+    uwind[i] <- NCEP.interp(
+      variable = 'uwnd', level = 925, 
+      lat = grouped_data$latitude[i], lon = grouped_data$longitude[i], 
+      dt = grouped_data$datetime[i], reanalysis2 = TRUE, 
+      keep.unpacking.info = TRUE
+    )
+    vwind[i] <- NCEP.interp(
+      variable = 'vwnd', level = 925, 
+      lat = grouped_data$latitude[i], lon = grouped_data$longitude[i], 
+      dt = grouped_data$datetime[i], reanalysis2 = TRUE, 
+      keep.unpacking.info = TRUE
+    )
+  }, error = function(e) {
+    message("Error at index ", i, ": ", e$message)
+  })
+}
+
+# Step 5: Add the extracted wind data to the dataframe
+grouped_data <- grouped_data %>%
+  mutate(
+    uwind = uwind,
+    vwind = vwind
+  )
+
+# Step 6: Calculate wind direction and speed
+grouped_data <- grouped_data %>%
+  mutate(
+    wind.dir = ifelse((atan2(uwind, vwind) * 180 / pi) < 0,
+                      (atan2(uwind, vwind) * 180 / pi) + 360,
+                      (atan2(uwind, vwind) * 180 / pi))
+  )
+                             
+problematic_rows <- grouped_data[uwind == 0 & vwind == 0, ]
+print(problematic_rows)
+
+# Plot with the wind vectors ----------------------------------------------
 
