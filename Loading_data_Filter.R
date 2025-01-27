@@ -1,6 +1,7 @@
 
 # libraries & working directory -------------------------------------------
 ## load libraries 
+{
 library(dplyr)
 library(lubridate)
 library(geosphere)  # For distance calculations (if needed)
@@ -13,7 +14,9 @@ library(RColorBrewer)
 library(rnaturalearth)
 library(rnaturalearthdata)
 library(patchwork)
-
+library(foreach)
+library(doParallel)
+ }
 # set working directory
 setwd("/Users/tom/Desktop/Research_project_2/Track_data_montagu_Harrier/Data on interruptions migrating harrier/RAW data individual tracks")
 
@@ -40,9 +43,71 @@ filtered_data <- fly_data %>%
     custom_hour_group = floor(time_diff / 60) # Create 60-minute groups
   )
 
-# Step 3: View data grouped by custom intervals
-grouped_data <- filtered_data %>%
-  arrange(custom_hour_group, date_time) # Sort by group and time
+# Step: Calculate orthodrome-based segment direction, length, and drift metrics
+grouped_data <- grouped_data %>%
+  arrange(date, custom_hour_group, date_time) %>% # Ensure proper order
+  mutate(
+    # Create a global row number across the entire dataset
+    global_row_number = row_number(),
+    
+    # Skip the very first row of the entire dataset for segment length and speed calculation
+    segment.length = if_else(
+      global_row_number > 1 & 
+        !is.na(latitude) & !is.na(longitude) & 
+        !is.na(lag(latitude)) & !is.na(lag(longitude)),
+      distVincentySphere(
+        cbind(longitude, latitude), 
+        cbind(lag(longitude), lag(latitude))
+      ) / 1000, # Convert to kilometers
+      NA_real_ # Assign NA for first row and invalid rows
+    ),
+    
+    # Calculate segment direction (orthodrome-based bearing)
+    segment.dir = if_else(
+      global_row_number > 1 & 
+        !is.na(latitude) & !is.na(longitude) & 
+        !is.na(lag(latitude)) & !is.na(lag(longitude)),
+      bearing(
+        cbind(lag(longitude), lag(latitude)), 
+        cbind(longitude, latitude)
+      ),
+      NA_real_ # Assign NA for the first row and invalid rows
+    ),
+    
+    # Use existing dtime for speed calculation, skipping the very first row
+    segment.speed = if_else(
+      global_row_number > 1 & 
+        !is.na(segment.length) & !is.na(dtime) & dtime > 0,
+      segment.length / dtime,
+      NA_real_ # Assign NA otherwise
+    )
+  ) %>%
+  group_by(date, custom_hour_group) %>%
+  mutate(
+    # Reference coordinates and direction for each hour
+    long.start.ref = first(longitude),
+    lat.start.ref = first(latitude),
+    long.end.ref = last(longitude),
+    lat.end.ref = last(latitude),
+    dir.ref = bearing(cbind(long.start.ref, lat.start.ref), cbind(long.end.ref, lat.end.ref)) # Hourly reference direction
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # Movement components relative to the hourly reference direction
+    dir.delta2 = dir.ref - segment.dir, # Directional difference
+    forward.speed = cos(dir.delta2 / (180 / pi)) * segment.speed, # Forward component of speed
+    perpen.speed = -sin(dir.delta2 / (180 / pi)) * segment.speed, # Perpendicular component of speed
+    
+    # Wind components relative to the hourly reference direction
+    dir.delta1 = dir.ref - wind.dir, # Wind direction difference
+    tailwind = cos(dir.delta1 / (180 / pi)) * wind.speed, # Tailwind component
+    crosswind = -sin(dir.delta1 / (180 / pi)) * wind.speed # Crosswind component
+  ) %>%
+  select(-global_row_number) # Drop the global_row_number column after calculations
+
+
+
+
 
 
 
@@ -51,38 +116,64 @@ grouped_data <- filtered_data %>%
 map_data <- grouped_data %>%
   filter(!is.na(latitude) & !is.na(longitude)) %>%
   mutate(
-    # Create 'day_group' which counts days from the first observation
     day_group = as.integer(difftime(date_time, min(date_time), units = "days")),
-    
-    # Extract the hour of the day from the 'date_time' column (0 to 23)
-    custom_hour_group = hour(date_time)  # Get hour from date_time (0 to 23)
+    custom_hour_group = hour(date_time)
   )
+
+# Extract the beginpoint and endpoint of the bird track
+beginpoint <- map_data %>%
+  slice(1) %>%
+  select(longitude, latitude) %>%
+  unlist() %>%
+  as.numeric()
+
+endpoint <- map_data %>%
+  slice(n()) %>%
+  select(longitude, latitude) %>%
+  unlist() %>%
+  as.numeric()
 
 # Step 2: Create a color palette for the hour groups (0 to 23)
 color_palette <- colorFactor(
-  palette = brewer.pal(n = 9, "Set1"), # Set1 palette, adjust if you have more than 9 hours
+  palette = brewer.pal(n = 9, "Set1"),
   domain = map_data$custom_hour_group
 )
 
-# Step 3: Create the Leaflet map
+# Step 3: Calculate the orthodrome (great-circle route)
+orthodrome_route <- gcIntermediate(
+  p1 = beginpoint, p2 = endpoint,
+  n = 100, addStartEnd = TRUE, sp = TRUE
+)
+
+# Step 4: Create the Leaflet map
 leaflet(map_data) %>%
   addTiles() %>%  # Add base map
+  # Add the flight path from GPS data
   addPolylines(
-    lng = ~longitude, lat = ~latitude,  # Use longitude and latitude for the flight path
-    color = ~color_palette(custom_hour_group),  # Color based on hour group (0-23)
+    lng = ~longitude, lat = ~latitude,
+    color = ~color_palette(custom_hour_group),
     weight = 2, opacity = 0.8,
-    group = ~paste(day_group, custom_hour_group)  # Group by day and hour
+    group = ~paste(day_group, custom_hour_group)
   ) %>%
+  # Add markers for each GPS point
   addCircleMarkers(
-    lng = ~longitude, lat = ~latitude,  # Add markers for each GPS point
-    radius = 3, color = ~color_palette(custom_hour_group), fill = TRUE, fillOpacity = 0.6,
+    lng = ~longitude, lat = ~latitude,
+    radius = 3, color = ~color_palette(custom_hour_group),
+    fill = TRUE, fillOpacity = 0.6,
     popup = ~paste0(
       "<b>Time:</b> ", date_time, "<br>",
       "<b>Speed:</b> ", speed, " km/h<br>",
       "<b>Day Group:</b> ", day_group, "<br>",
       "<b>Hour:</b> ", custom_hour_group
-    )  # Add popups with additional information
+    )
   ) %>%
+  # Overlay the orthodrome
+  addPolylines(
+    data = orthodrome_route,
+    color = "blue", weight = 2, opacity = 0.8,
+    label = "Orthodrome (Great Circle)"
+  ) %>%
+  # Add a legend
   addLegend(
     position = "bottomright",
     pal = color_palette, values = map_data$custom_hour_group,
@@ -90,63 +181,6 @@ leaflet(map_data) %>%
     opacity = 0.8
   )
 
-
-# Track plot Per day GGPLOT ------------------------------------------------------
-# Step 1: Prepare World Map
-world_map <- ne_countries(scale = "medium", returnclass = "sf")
-
-# Step 2: Prepare Bird Data
-map_data <- map_data %>%
-  filter(!is.na(latitude) & !is.na(longitude)) %>%
-  mutate(
-    longitude = ifelse(longitude > 180, longitude - 360, longitude)
-  )
-
-# Step 3: Calculate the Bounding Box (min/max lat/lon) for Each Day
-map_data_limits <- map_data %>%
-  group_by(date) %>%
-  summarise(
-    lon_min = min(longitude, na.rm = TRUE),
-    lon_max = max(longitude, na.rm = TRUE),
-    lat_min = min(latitude, na.rm = TRUE),
-    lat_max = max(latitude, na.rm = TRUE)
-  )
-
-# Step 4: Create the Plot with Dynamic Zoom for Each Day
-ggplot() +
-  # Add the world map as the background
-  geom_sf(data = world_map, fill = "lightgray", color = "white") +
-  # Add the bird track with increased linewidth for visibility
-  geom_path(
-    data = map_data,
-    aes(x = longitude, y = latitude, group = date),
-    linewidth = 2, alpha = 0.8, color = "blue"
-  ) +
-  # Add points for the bird positions
-  geom_point(
-    data = map_data,
-    aes(x = longitude, y = latitude),
-    size = 3, alpha = 0.6, color = "red"
-  ) +
-  # Customize the appearance
-  labs(
-    title = "Bird Migration Tracks by Day",
-    x = "Longitude",
-    y = "Latitude"
-  ) +
-  theme_minimal() +
-  # Facet the plot by date
-  #facet_wrap(~date) +
-  # Apply coord_cartesian() to dynamically zoom for each day
-  coord_cartesian(
-    xlim = c(-180, 180), # Keep a global limit for longitude
-    ylim = c(-90, 90),    # Keep a global limit for latitude
-    expand = FALSE
-  ) +
-  theme(
-    strip.text = element_text(size = 10), # Smaller facet labels
-    axis.text = element_text(size = 8)    # Axis text size
-  )
 
 # Extract wind data -------------------------------------------------------
 # Step 1: Ensure the Grouped_data has required columns
@@ -162,12 +196,6 @@ grouped_data <- grouped_data %>%
     datetime = as.POSIXct(paste(date, sprintf("%02d:00:00", hour)),
                           format = "%Y-%m-%d %H:%M:%S", tz = "UTC"),
     datetime = format(as.POSIXct(datetime), "%Y-%m-%d %H:%M:%S")  # Reformat to character
-  )
-
-# Step 2.1: Transform longitudes to the 0-360 range
-grouped_data <- grouped_data %>%
-  mutate(
-    longitude = ifelse(longitude < 0, 360 + longitude, longitude)
   )
 
 # Step 3: Initialize empty vectors for wind data
@@ -206,11 +234,53 @@ grouped_data <- grouped_data %>%
   mutate(
     wind.dir = ifelse((atan2(uwind, vwind) * 180 / pi) < 0,
                       (atan2(uwind, vwind) * 180 / pi) + 360,
-                      (atan2(uwind, vwind) * 180 / pi))
+                      (atan2(uwind, vwind) * 180 / pi)), 
+    wind.speed = sqrt(uwind^2 + vwind^2)
   )
                              
 problematic_rows <- grouped_data[uwind == 0 & vwind == 0, ]
-print(problematic_rows)
 
-# Plot with the wind vectors ----------------------------------------------
+# REFERENCE DIRECTION AND FW SPEED VS TAILWIND ----------------------------------------------
+# Step 1: Calculate orthodrome metrics
+data_ort <- grouped_data %>%
+  arrange(custom_hour_group, date_time) %>% # Ensure proper ordering
+  group_by(date, custom_hour_group) %>%
+  mutate(
+    # Reference coordinates and direction for each hour
+    long.start.ref = first(longitude),
+    lat.start.ref = first(latitude),
+    long.end.ref = last(longitude),
+    lat.end.ref = last(latitude),
+    dir.ref = bearing(cbind(long.start.ref, lat.start.ref), cbind(long.end.ref, lat.end.ref)) # Hourly reference direction
+  ) %>%
+  ungroup() %>%
+  mutate(
+    # Calculate movement components relative to the hourly reference direction
+    dir.delta2 = dir.ref - segment.dir, # Directional difference
+    forward.speed = cos(dir.delta2 / (180 / pi)) * segment.speed, # Forward component of speed
+    perpen.speed = -sin(dir.delta2 / (180 / pi)) * segment.speed, # Perpendicular component of speed
+    
+    # Wind components relative to the hourly reference direction
+    dir.delta1 = dir.ref - wind.dir, # Wind direction difference
+    tailwind = cos(dir.delta1 / (180 / pi)) * wind.speed, # Tailwind component
+    crosswind = -sin(dir.delta1 / (180 / pi)) * wind.speed # Crosswind component
+  )
+
+
+# Plotting -----------------------------------------------------------------------
+# Plot for data_ort: Tailwind vs Forward Speed
+plot(data_ort$tailwind, data_ort$forward.speed, 
+     pch = 19, col = 'firebrick', 
+     xlab = "Tailwind (m/s)", ylab = "Forward Speed (km/h)",
+     main = "Tailwind vs Forward Speed (Orthodrome)")
+abline(lm(forward.speed ~ tailwind, data = data_ort), col = "blue", lwd = 2)
+
+# Plot for data_ort: Crosswind vs Perpendicular Speed
+plot(data_ort$crosswind, data_ort$perpen.speed, 
+     pch = 19, col = 'firebrick', 
+     xlab = "Crosswind (m/s)", ylab = "Perpendicular Speed (km/h)",
+     main = "Crosswind vs Perpendicular Speed (Orthodrome)")
+abline(lm(perpen.speed ~ crosswind, data = data_ort), col = "blue", lwd = 2)
+
+
 
