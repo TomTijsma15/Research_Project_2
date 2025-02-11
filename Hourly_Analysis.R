@@ -217,10 +217,11 @@ rad_to_deg <- function(rad) rad * (180 / pi)
 
 hour_dat <- hour_dat %>%
   mutate(
-    # Convert wind speed to km/h and compute vector components
+    # Compute ground speed components
     V_x_ground = segment.speed * cos(deg_to_rad(segment.dir)),  
     V_y_ground = segment.speed * sin(deg_to_rad(segment.dir)),  
     
+    # Compute wind speed components
     V_x_wind = wind.speed * cos(deg_to_rad(wind.dir)),
     V_y_wind = wind.speed * sin(deg_to_rad(wind.dir)),
     
@@ -452,3 +453,44 @@ for (day in names(plot_list)) {
 # Close the PDF device
 dev.off()
 
+
+
+# CHECK THE VECOTRS -------------------------------------------------------
+# For each observation, create a plot showing the airspeed, wind, and ground vectors
+hour_dat %>%
+  ggplot(aes(x = start_longitude, y = start_latitude)) +
+  # Airspeed vector
+  geom_segment(aes(xend = start_longitude + V_x_air, 
+                   yend = start_latitude + V_y_air), 
+               color = "goldenrod", arrow = arrow(length = unit(0.2, "cm")), size = 1) +
+  
+  # Wind vector
+  geom_segment(aes(xend = start_longitude + V_x_wind, 
+                   yend = start_latitude + V_y_wind), 
+               color = "deepskyblue", arrow = arrow(length = unit(0.2, "cm")), size = 1) +
+  
+  # Ground vector
+  geom_segment(aes(xend = start_longitude + V_x_ground, 
+                   yend = start_latitude + V_y_ground), 
+               color = "darkgreen", arrow = arrow(length = unit(0.2, "cm")), size = 1) +
+  
+  # Parallelogram edges (optional)
+  geom_segment(aes(x = start_longitude + V_x_air, y = start_latitude + V_y_air,
+                   xend = start_longitude + V_x_wind + V_x_air, 
+                   yend = start_latitude + V_y_wind + V_y_air),
+               color = "gray", linetype = "dashed") +
+  geom_segment(aes(x = start_longitude + V_x_wind, y = start_latitude + V_y_wind,
+                   xend = start_longitude + V_x_ground, 
+                   yend = start_latitude + V_y_ground),
+               color = "gray", linetype = "dashed") +
+  
+  labs(title = "Airspeed, Wind, and Ground Vectors with Parallelogram",
+       x = "Longitude", y = "Latitude") +
+  theme_minimal() +
+  coord_fixed(ratio = 1) + # Maintain aspect ratio
+  theme(
+    axis.title = element_blank(),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),  # Remove ticks
+    legend.title = element_blank()  # Remove legend title
+  )
