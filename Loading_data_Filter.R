@@ -34,7 +34,7 @@
   library(tidyr)
 }
 # set working directory
-setwd("/Users/tom/Desktop/Research_project_2/Track_data_montagu_Harrier/Data on interruptions migrating harrier/RAW data individual tracks")
+setwd("/Users/tomtijsma/Documents/Masters/_Github/Research_Project_2/RAW data individual tracks")
 
 # remove list 
 rm(list=ls())
@@ -116,11 +116,6 @@ grouped_data <- filtered_data %>%
     perpen.speed = -sin(dir.delta2 / (180 / pi)) * segment.speed
   ) %>%
   select(-daily_row_number)
-
-
-ggplot(data=grouped_data, aes(x=dtime, y=segment.speed)) +
-  geom_point() 
-
 
 
 # Track plot, Whole track LEAFLET--------------------------------------------------------------
