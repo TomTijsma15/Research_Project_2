@@ -31,21 +31,58 @@
   library(prettymapr)
   library(circular)
   library(tidyr)
+  library(grid)
 }
+
+# LOAD DATA ---------------------------------------------------------------
+
+# set working directory
+setwd("/Users/tom/Documents/Masters/_Github/Research_Project_2/RAW data individual tracks")
+
+# remove list
+rm(list=ls())
+
+# load data
+data <- read.csv("Data.All.Corry_autumn_2012.csv.NEW.csv") 
+
+# Step 1: Filter for periods with at least 5 consecutive "fly"
+fly_data1 <- data %>%
+  mutate(fly_group = cumsum(speed.class != "fly")) %>%  # Group consecutive "fly" rows
+  group_by(fly_group) %>%
+  filter(speed.class == "fly" & n() >= 5) %>%          # Keep groups with at least 5 consecutive "fly"
+  ungroup() %>%
+  select(-fly_group)                                   # Remove helper column
+
+# Step 2: Define custom 60-minute intervals starting from the first timestamp
+filtered_data1 <- fly_data1 %>%
+  mutate(
+    date_time = as.POSIXct(date_time, format = "%Y-%m-%d %H:%M:%S"), # Ensure proper datetime format
+    time_diff = as.numeric(difftime(date_time, min(date_time), units = "mins")), # Minutes since the first timestamp
+    custom_hour_group = floor(time_diff / 60) # Create 60-minute groups
+  )
+
+#Step 3: Get global start/end reference points from the ENTIRE dataset (not grouped_data)
+locs.start.ref <- cbind(data$longitude[1], data$latitude[1])
+locs.end.ref <- cbind(data$longitude[nrow(data)], data$latitude[nrow(data)])
+
+#Step 4: Calculate global reference direction (same for all rows)
+global_dir.ref <- bearingRhumb(locs.start.ref, locs.end.ref)
+
+
 # CREATE NEW DATAFRAME FOR HOURLY DATA ------------------------------------
 # Ensure your date_time column is correctly converted to POSIXct.
-fly_data <- fly_data %>% 
+fly_data1 <- fly_data1 %>% 
   mutate(date_time = as.POSIXct(date_time, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"))
 
 # Define the start and end times for your data.
-start_time <- min(fly_data$date_time, na.rm = TRUE)
-end_time   <- max(fly_data$date_time, na.rm = TRUE)
+start_time <- min(fly_data1$date_time, na.rm = TRUE)
+end_time   <- max(fly_data1$date_time, na.rm = TRUE)
 
 # Create breaks for 60-minute intervals starting from the first timestamp.
 breaks <- seq(from = start_time, to = end_time, by = "60 min")
 
 # Create a new data frame with an "interval" column indicating each 60-minute period.
-data_60min <- fly_data %>%
+data_60min <- fly_data1 %>%
   mutate(interval = cut(date_time, breaks = breaks, right = FALSE))
 
 # Summarise the data by 60-minute intervals.
@@ -108,8 +145,19 @@ hour_dat <- data_60min %>%
     dir.delta2    = dir.ref - segment.dir,
     forward.speed = cos(dir.delta2 * pi/180) * segment.speed,
     perpen.speed  = -sin(dir.delta2 * pi/180) * segment.speed
-  )
+  ) %>%
+  # For the first record of each day, remove segment length and speed since there is no prior point.
+  group_by(day = as.Date(start_date_time)) %>%
+  mutate(
+    segment.length = if_else(row_number() == 1, NA_real_, segment.length),
+    segment.speed  = if_else(row_number() == 1, NA_real_, segment.speed),
+    forward.speed  = if_else(row_number() == 1, NA_real_, forward.speed),
+    perpen.speed   = if_else(row_number() == 1, NA_real_, perpen.speed)
+  ) %>%
+  ungroup() %>%
+  select(-day)
 
+####
 
 # EXTRACT WIND DATA -------------------------------------------------------
 # Step 1: Ensure the hour_dat has required columns
@@ -346,7 +394,8 @@ migration_plot <- ggplot(map_data_ggplot, aes(x = start_longitude, y = start_lat
 print(migration_plot)
 
 
-###
+
+# WIND DATA PLOTS PDF EXPORT & SCALE CHANGES ------------------------------
 
 # Prepare data for plotting
 map_data_ggplot1 <- hour_dat %>%
@@ -454,6 +503,94 @@ for (day in names(plot_list)) {
 dev.off()
 
 
+## PLOTS WIT VIXED AXIS FOR NO DISTORTION 
+# Set fixed span (change this if you want a different range)
+fixed_span <- 6      # total degrees (CHANGE AS NEEDED)
+half_span <- fixed_span / 2  # half the span
+
+for (day in unique_days) {
+  day_data <- filter(map_data_ggplot1, date_label == day)
+  
+  # Calculate the center of the track
+  center_lat <- mean(range(day_data$start_latitude))
+  center_lon <- mean(range(day_data$start_longitude))
+  
+  # Format the day for title
+  day_formatted <- as.character(format(as.Date(day), "%d-%b-%y"))
+  
+  plot_list[[day_formatted]] <- ggplot(day_data, aes(x = start_longitude, y = start_latitude)) +
+    geom_path(aes(color = hour_group, group = date_label), 
+              linewidth = 1.2, alpha = 1) +
+    
+    # Wind vector arrows (blue)
+    geom_segment(aes(xend = wind_end_lon, yend = wind_end_lat,
+                     alpha = wind.speed), 
+                 color = "deepskyblue", 
+                 arrow = arrow(length = unit(0.15, "cm"), type = "closed")) +  
+    
+    # Bird airspeed vectors (goldenrod)
+    geom_segment(aes(xend = heading_end_lon, yend = heading_end_lat,
+                     linewidth = airspeed),  
+                 color = "goldenrod1", alpha = 0.8,
+                 arrow = arrow(length = unit(0.1, "cm"), type = "closed")) +  
+    
+    scale_color_viridis_c(name = "Hour of Day", option = "plasma") +
+    scale_alpha_continuous(name = "Wind Speed (km/h)", range = c(0.3, 0.8)) +
+    scale_linewidth_continuous(name = "Airspeed (km/h)", range = c(0.3, 0.8)) +  
+    
+    labs(
+      title = paste("Migration Path on", day_formatted),
+      x = "Longitude", y = "Latitude"
+    ) +
+    theme_minimal() +
+    theme(
+      panel.background = element_rect(fill = "white", colour = "gray40"),
+      legend.position = "right",
+      strip.background = element_rect(fill = "gray40"),
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold")
+    ) +
+    
+    # Fix aspect ratio and set fixed x and y limits based on the center
+    coord_fixed(xlim = c(center_lon - half_span, center_lon + half_span),
+                ylim = c(center_lat - half_span, center_lat + half_span)) +
+    
+    # Add custom north arrow
+    annotation_custom(
+      grob = grid::gTree(children = grid::gList(
+        grid::segmentsGrob(
+          x0 = 0.05, y0 = 0.85, 
+          x1 = 0.05, y1 = 0.95, 
+          gp = grid::gpar(col = "black", lwd = 2),
+          arrow = grid::arrow(type = "closed", length = unit(0.1, "inches"))
+        ),
+        grid::textGrob(
+          label = "N",
+          x = 0.05, y = 0.82,
+          gp = grid::gpar(col = "black", fontface = "bold", fontsize = 10)
+        )
+      )),
+      xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf
+    )
+}
+
+# Print all plots
+for (day in names(plot_list)) {
+  print(plot_list[[day]])
+}
+
+# export the plots into a PDF 
+# Specify the PDF file name and open the PDF device
+pdf("Corry_autumn_2012_1.pdf", height = 8, width = 8) # INSERT NAME YEAR AND SEASON OF THE BIRD 
+
+# Loop through each plot in the plot_list and print it to the PDF
+for (day in names(plot_list)) {
+  print(plot_list[[day]])  # Print each plot to the PDF
+}
+
+# Close the PDF device
+dev.off()
+
+
 
 # CHECK THE VECOTRS -------------------------------------------------------
 # For each observation, create a plot showing the airspeed, wind, and ground vectors
@@ -462,17 +599,17 @@ hour_dat %>%
   # Airspeed vector
   geom_segment(aes(xend = start_longitude + V_x_air, 
                    yend = start_latitude + V_y_air), 
-               color = "goldenrod", arrow = arrow(length = unit(0.2, "cm")), size = 1) +
+               color = "goldenrod", arrow = arrow(length = unit(0.2, "cm")), linewidth = 1) +
   
   # Wind vector
   geom_segment(aes(xend = start_longitude + V_x_wind, 
                    yend = start_latitude + V_y_wind), 
-               color = "deepskyblue", arrow = arrow(length = unit(0.2, "cm")), size = 1) +
+               color = "deepskyblue", arrow = arrow(length = unit(0.2, "cm")), linewidth = 1) +
   
   # Ground vector
   geom_segment(aes(xend = start_longitude + V_x_ground, 
                    yend = start_latitude + V_y_ground), 
-               color = "darkgreen", arrow = arrow(length = unit(0.2, "cm")), size = 1) +
+               color = "darkgreen", arrow = arrow(length = unit(0.2, "cm")), linewidth = 1) +
   
   # Parallelogram edges (optional)
   geom_segment(aes(x = start_longitude + V_x_air, y = start_latitude + V_y_air,
